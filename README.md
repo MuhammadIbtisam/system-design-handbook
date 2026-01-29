@@ -14,3 +14,7 @@ This repository focuses on:
 - Using real-world examples instead of purely theoretical explanations
 
 The goal of this handbook is not just to help you design systems, but to help you think and explain like a senior engineer.
+
+## System Design Guides
+
+- [URL Shortener (TinyURL)](./guides/url-shortener.md) - Design a URL shortening service like TinyURL or bit.ly
