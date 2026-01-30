@@ -147,3 +147,79 @@ When a user accesses a short URL:
 - **301 (Moved Permanently)** — Would cause browsers to cache the redirect permanently, bypassing the server on future requests. This prevents analytics tracking and makes it impossible to update or expire URLs.
 
 ---
+
+## Database Schema
+
+### URLs Table
+
+The primary table that stores the mapping between short codes and original URLs.
+
+| Field | Type | Constraints | Description |
+|-------|------|-------------|-------------|
+| `short_code` | VARCHAR(10) | PRIMARY KEY | The unique short code (e.g., `abc123`) |
+| `original_url` | TEXT | NOT NULL | The destination URL to redirect to |
+| `created_at` | TIMESTAMP | NOT NULL, DEFAULT NOW() | When the short URL was created |
+| `updated_at` | TIMESTAMP | NULL | Last modification timestamp (for audit) |
+| `expiration_time` | TIMESTAMP | NULL | When the short URL expires (nullable = never expires) |
+| `created_by` | UUID | FOREIGN KEY → Users | The user who created this short URL |
+| `is_active` | BOOLEAN | DEFAULT TRUE | Soft delete flag to disable without removing |
+
+**Indexes:**
+- `PRIMARY KEY (short_code)` — Fast lookups for redirects
+- `INDEX (created_by)` — Query all URLs by a specific user
+- `INDEX (expiration_time)` — Efficiently find and clean up expired URLs
+
+### Clicks Table (Optional — for Analytics)
+
+If you need detailed analytics beyond a simple counter, store each click as a separate record.
+
+| Field | Type | Constraints | Description |
+|-------|------|-------------|-------------|
+| `id` | BIGINT | PRIMARY KEY, AUTO_INCREMENT | Unique click identifier |
+| `short_code` | VARCHAR(10) | FOREIGN KEY → URLs | The short URL that was clicked |
+| `clicked_at` | TIMESTAMP | NOT NULL, DEFAULT NOW() | When the click occurred |
+| `ip_address` | VARCHAR(45) | NULL | Client IP (for geo tracking) |
+| `user_agent` | TEXT | NULL | Browser/device information |
+| `referrer` | TEXT | NULL | Where the click came from |
+
+**Indexes:**
+- `INDEX (short_code, clicked_at)` — Analytics queries by URL and time range
+
+### Users Table (If User Accounts Exist)
+
+| Field | Type | Constraints | Description |
+|-------|------|-------------|-------------|
+| `id` | UUID | PRIMARY KEY | Unique user identifier |
+| `email` | VARCHAR(255) | UNIQUE, NOT NULL | User's email address |
+| `created_at` | TIMESTAMP | NOT NULL, DEFAULT NOW() | Account creation time |
+
+### Schema Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                        URLs                             │
+├─────────────────────────────────────────────────────────┤
+│ short_code (PK)    VARCHAR(10)                          │
+│ original_url       TEXT                                 │
+│ created_at         TIMESTAMP                            │
+│ updated_at         TIMESTAMP                            │
+│ expiration_time    TIMESTAMP                            │
+│ created_by (FK)    UUID ─────────────┐                  │
+│ is_active          BOOLEAN           │                  │
+└─────────────────────────────────────────────────────────┘
+           │                           │
+           │ 1:N                       │
+           ▼                           ▼
+┌─────────────────────────┐    ┌─────────────────────────┐
+│        Clicks           │    │         Users           │
+├─────────────────────────┤    ├─────────────────────────┤
+│ id (PK)      BIGINT     │    │ id (PK)      UUID       │
+│ short_code   VARCHAR(10)│    │ email        VARCHAR    │
+│ clicked_at   TIMESTAMP  │    │ created_at   TIMESTAMP  │
+│ ip_address   VARCHAR(45)│    └─────────────────────────┘
+│ user_agent   TEXT       │
+│ referrer     TEXT       │
+└─────────────────────────┘
+```
+
+---
