@@ -112,3 +112,38 @@ Resolves a short code and redirects the caller to the original URL.
 |-------------|----------------------------------------------------|
 | **Path**    | `/{short_code}` (e.g. `/abc123`)                   |
 | **Response**| `302 Found` — Redirect to the original URL         |
+
+
+---
+
+## High-Level Design
+
+![High-Level Design](./High-Level Design.png)
+
+The diagram above shows the core flow of the URL shortener system:
+
+### 1. URL Shortening Process
+
+When a client (mobile or web application) wants to shorten a URL:
+
+1. **Client** sends a `POST /url` request with the original URL to the **Primary Server**
+2. **Primary Server** receives the request and validates the original URL
+3. **IF URL is valid**: The server generates a unique short URL (or uses a custom alias if provided) and saves the mapping to the **DB**
+4. **IF URL is invalid**: The server returns an error response
+5. **Response**: The server returns the short URL (e.g., `https://short.example.com/abc123`) to the client
+
+### 2. URL Redirection Process
+
+When a user accesses a short URL:
+
+1. **Client** sends a `GET /{short_code}` request to the **Primary Server**
+2. **Primary Server** queries the **DB** to find the original URL mapped to the short code
+3. **IF mapping exists**: The server returns a `302 Redirect` to the original URL
+4. **Client** is redirected to the original destination
+
+### Why 302 Redirect Instead of 301?
+
+- **302 (Found/Temporary)** — Allows flexibility for analytics tracking, expiration handling, and URL updates. Browsers won't permanently cache the redirect.
+- **301 (Moved Permanently)** — Would cause browsers to cache the redirect permanently, bypassing the server on future requests. This prevents analytics tracking and makes it impossible to update or expire URLs.
+
+---
