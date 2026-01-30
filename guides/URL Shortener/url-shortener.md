@@ -118,7 +118,7 @@ Resolves a short code and redirects the caller to the original URL.
 
 ## High-Level Design
 
-![High-Level Design](./High-Level Design.png)
+![High-Level Design](../../images/url-shortener/High-Level%20Design.png)
 
 The diagram above shows the core flow of the URL shortener system:
 
