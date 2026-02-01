@@ -17,4 +17,4 @@ The goal of this handbook is not just to help you design systems, but to help yo
 
 ## System Design Guides
 
-- [URL Shortener (TinyURL)](./guides/url-shortener.md) - Design a URL shortening service like TinyURL or bit.ly
+- [URL Shortener (TinyURL)](./guides/URL%20Shortener/url-shortener.md) - Design a URL shortening service like TinyURL or bit.ly
