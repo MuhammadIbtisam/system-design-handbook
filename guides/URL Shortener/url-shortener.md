@@ -223,3 +223,148 @@ If you need detailed analytics beyond a simple counter, store each click as a se
 ```
 
 ---
+
+## Deep Dive: Short Code Generation
+
+The first requirement is clear: **short codes must be unique**. How we generate them matters for correctness, collision handling, and scale.
+
+### ❌ Bad Approach: URL Prefix
+
+A naive idea is to use the first N characters of the original URL as the short code.
+
+**Example:** For `www.linkedin.com/muhammadibtisam`, taking the first 6 characters gives `www.li` or `www.lin`. Multiple URLs would collide:
+
+- `www.linkedin.com/...`
+- `www.linux.org/...`
+- `www.live.com/...`
+
+All could map to the same prefix, causing **duplicates** and overwriting mappings. **Not recommended.**
+
+---
+
+### ⚠️ Alternative Approach: Random + Base62
+
+1. Generate a random number
+2. Encode it in **Base62** (0–9, a–z, A–Z) to get a short, URL-safe string
+3. Use that as the short code
+
+**Problem:** Random numbers can collide. You need a **retry loop**: if the short code already exists, generate a new one and try again.
+
+**When to use:** If you need unpredictability (e.g., to avoid enumeration), this works, but collision handling adds complexity and retries.
+
+---
+
+### ✅ Recommended Approach: Counter + Base62
+
+Use an **incrementing counter** as the source of uniqueness:
+
+1. **Get a unique ID** — Use a counter (e.g., Redis `INCR` or DB sequence) to obtain the next value.
+2. **Encode to Base62** — Convert the ID to Base62; that string is the short code.
+3. **Store** — Persist the mapping with guaranteed uniqueness.
+
+**Why this works:**
+
+- The counter always yields a unique value.
+- No collision handling or retries.
+- Deterministic and easy to reason about.
+
+**Implementation:** Use **Redis** as a distributed counter. Redis `INCR` is atomic, fast, and works across multiple application servers.
+
+| Characters | Base62 Combinations | Example Scale |
+|------------|---------------------|---------------|
+| 6          | ~1 billion          | Sufficient for most products |
+| 7          | ~3.5 trillion       | Room for long-term growth    |
+
+Base62 gives you billions or trillions of unique short codes in only 6–7 characters.
+
+**Summary:** Unless you need randomness, use a counter + Base62 for simple, collision-free short code generation.
+
+---
+
+## Deep Dive: Low-Latency Redirects
+
+The second key requirement is **low latency** — redirects must be fast. Here’s how to think through scaling and caching.
+
+### Understanding the Load
+
+With **100 million daily active users** and an average of **5 redirect reads per user per day**:
+
+| Step | Calculation | Result |
+|------|-------------|--------|
+| Daily read requests | 100M DAU × 5 reads/day | **500 million** requests/day |
+| Requests per second | 500M ÷ 86,400 seconds | **~5,800** requests/second |
+
+Peak traffic can be 2–3× higher, so plan for **10,000–20,000+ RPS**. The database alone cannot handle this load reliably.
+
+---
+
+### ❌ Naive Approach: Indexes + Distributed DB
+
+Add indexes on `short_code` and scale the database horizontally.
+
+**Problem:** Even with indexes and distributed databases, at 5,800+ RPS the DB becomes a bottleneck. Latency increases, and the system struggles to serve all users reliably.
+
+---
+
+### ✅ Better Approach: Add Caching
+
+URL shorteners are **read-heavy**: redirects far outnumber shorten operations. Caching is a natural fit.
+
+#### Cache-Aside Pattern
+
+1. **Check cache** — Look up the short code in the cache (e.g., Redis or Memcached).
+2. **On hit** — Return the original URL and redirect. No DB call.
+3. **On miss** — Query the DB. If found, **write to cache**, then return the URL. If not found, return 404.
+
+#### Cache Eviction: LRU
+
+Cache size is limited. Use **Least Recently Used (LRU)** eviction so that popular short URLs stay cached while rarely used ones are evicted.
+
+#### Cache Throughput
+
+| Technology | Approximate throughput | Notes |
+|------------|------------------------|-------|
+| Redis (single node) | 80,000–100,000+ ops/sec | In-memory, sub-millisecond latency |
+| Memcached (single node) | 100,000+ ops/sec | Similar to Redis |
+| Redis Cluster | Scales linearly with shards | Add nodes to increase capacity |
+
+A single Redis instance can handle **~100,000 requests/second**, well above the ~5,800 RPS baseline. With a cluster, you can absorb peak traffic and growth.
+
+---
+
+### ✅ Best Approach: Cache + CDN
+
+For users spread across regions, add a **CDN** in front of your API or redirect endpoint.
+
+- **CDN edge nodes** cache redirects close to users.
+- Users get redirected from the nearest edge, often **without hitting your origin server**.
+- Latency drops further (e.g., 10–50 ms instead of 100+ ms).
+
+**Trade-offs:**
+
+| Benefit | Drawback |
+|---------|----------|
+| Lower latency for global users | Higher cost (CDN bandwidth and requests) |
+| Offloads traffic from origin | **Cache invalidation** — when a short URL is deleted or updated, you must purge it from the CDN |
+| Better resilience during spikes | More moving parts to operate and monitor |
+
+**Invalidation:** If a user deletes or updates a short URL, you need a process to invalidate that key in your CDN cache (e.g., purge API). Otherwise, stale redirects may be served.
+
+---
+
+### Recommendation
+
+| Budget | Approach |
+|--------|----------|
+| **Lower** | Cache (Redis/Memcached) — sufficient for ~100K RPS, simple to run |
+| **Higher** | Cache + CDN — best latency and scalability for global users |
+
+Start with caching; add a CDN when you need global performance or have budget for it.
+
+---
+
+## Potential Deep Dives — Architecture Overview
+
+![Short URL Deep Dive](../../images/url-shortener/Short%20URL%20DD.png)
+
+---
