@@ -22,23 +22,6 @@ A **real-time microblogging service** where users create short posts/messages ca
 
 ---
 
-## Requirements
-
-### Functional Requirements
-
-1. **Create, update, or delete tweets** — Users can post new tweets and edit or delete their own tweets.
-2. **Follow other users** — Users can follow (and unfollow) other users to control whose tweets appear in their timeline.
-3. **See timelines** — Users can see tweets from the users they follow (home timeline).
-4. **Reply to tweets** — Users can write replies to other users' tweets.
-
-### Non-Functional Requirements
-
-- **Scale** — Support **20 million+** daily active users.
-- **Availability over consistency** — The system should prioritize **availability** (staying up and serving requests) over strong consistency; eventual consistency is acceptable.
-- **Low latency** — Timelines must load with low latency (e.g., hundreds of milliseconds).
-
----
-
 ## Key Concepts (Notes)
 
 ### Pull-based vs push-based timeline
@@ -67,3 +50,89 @@ A **real-time microblogging service** where users create short posts/messages ca
 - For **news feeds / timelines**, eventual consistency is usually **acceptable**: a new tweet appearing in a follower's feed a few seconds late is often fine. That allows simpler, more available, and lower-latency designs (e.g., caches, async fan-out).
 
 ---
+
+
+## Requirements
+
+### Functional Requirements
+
+1. **Create, update, or delete tweets** — Users can post new tweets and edit or delete their own tweets.
+2. **Follow other users** — Users can follow (and unfollow) other users to control whose tweets appear in their timeline.
+3. **See timelines** — Users can see tweets from the users they follow (home timeline).
+4. **Reply to tweets** — Users can write replies to other users' tweets.
+
+### Non-Functional Requirements
+
+- **Scale** — Support **20 million+** daily active users.
+- **Availability over consistency** — The system should prioritize **availability** (staying up and serving requests) over strong consistency; eventual consistency is acceptable.
+- **Low latency** — Timelines must load with low latency (e.g., hundreds of milliseconds).
+
+---
+
+## Core Entities
+
+| Entity | Description |
+|--------|-------------|
+| **User** | An account that can post tweets, follow others, and have a timeline. |
+| **Tweet** (Post) | A single post/message created by a user. Has content, author, timestamp; can be a reply to another tweet. |
+| **Follow** | The relationship “user A follows user B.” Stored as a directed edge (e.g. `follower_id` → `followee_id`). *Follower* = the user who follows; *followee* = the user being followed. |
+| **Timeline** | The ordered list of tweets a user sees (e.g. home timeline = tweets from people they follow). Not necessarily a stored table—can be derived from Users + Follows + Tweets, or pre-computed/cached for performance. |
+
+**Note:** Follower and followee are the two sides of one **Follow** relationship, not two separate entity types. The core persisted entities are **User**, **Tweet**, and **Follow**; **Timeline** is the main view/result the system serves.
+
+---
+
+## API
+
+### 1. Create a tweet (post)
+
+**`POST /tweets`**
+
+Creates a new tweet for the authenticated user.
+
+| Field       | Type   | Required | Description                    |
+|------------|--------|----------|--------------------------------|
+| `user_id`  | string | yes      | Author of the tweet.           |
+| `content`  | string | yes      | Tweet text.                    |
+| `reply_to` | string | no       | Tweet ID if this is a reply.   |
+
+**Response:** The created tweet (e.g. `tweet_id`, `user_id`, `content`, `created_at`).
+
+---
+
+### 2. Follow (or unfollow) a user
+
+**`POST /follow`** — Follow another user.
+
+| Field         | Type   | Required | Description           |
+|--------------|--------|----------|-----------------------|
+| `follower_id`| string | yes      | User who is following.|
+| `followee_id`| string | yes      | User being followed.  |
+
+**`DELETE /follow`** — Unfollow a user.
+
+| Field         | Type   | Required | Description           |
+|--------------|--------|----------|-----------------------|
+| `follower_id`| string | yes      | User who is following.|
+| `followee_id`| string | yes      | User being followed.  |
+
+**Response:** Success or error (e.g. 204 No Content on success).
+
+---
+
+### 3. Fetch home timeline
+
+**`GET /timeline`**
+
+Returns the home timeline for a user: all tweets from users they follow, ordered by time (newest first), with pagination.
+
+| Query      | Type   | Required | Description                                      |
+|------------|--------|----------|--------------------------------------------------|
+| `user_id`  | string | yes      | User whose timeline to fetch.                    |
+| `limit`    | int    | no       | Max number of tweets to return (e.g. 20).       |
+| `cursor`   | string | no       | Pagination cursor for the next page (e.g. tweet ID or timestamp). |
+
+**Response:** List of tweets (with author info, timestamp, etc.) and optional `next_cursor` for the next page.
+
+---
+
