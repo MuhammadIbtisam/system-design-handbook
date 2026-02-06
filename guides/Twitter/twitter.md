@@ -136,3 +136,50 @@ Returns the home timeline for a user: all tweets from users they follow, ordered
 
 ---
 
+## High-Level Design
+
+![Twitter High-Level Design](../../images/twitter/Twitter%20HLD.png)
+
+The diagram shows how clients, API Gateway, and backend services work together with separate stores for tweets, media, and the follow graph.
+
+### Components
+
+| Component | Role |
+|-----------|------|
+| **Clients** | Mobile and Web app; all requests enter through the API Gateway. |
+| **API Gateway** | Single entry point: **routing** to the right service, **rate limiting**, **load balancing**, and **authentication**. |
+| **Tweets server** | Create, update, delete tweets; stores tweet and media metadata in DB; uploads media to S3. |
+| **Timeline server** | Builds and returns a user's home timeline using follow data and tweet metadata (and media from S3). |
+| **User server** | Manages follower/following relationships; reads and writes the **Graph DB**. |
+| **Tweets Primary DB** | Authoritative store for tweet and media metadata; syncs to replicas. |
+| **Tweets REPLICA DBs** | Read replicas for tweet reads; reduce load on primary and improve read performance. |
+| **Graph DB** | Stores who follows whom; used by User server and by Timeline server to know which users' tweets to fetch. |
+| **AWS S3** | Stores actual media files (images, videos); Tweets server writes, Timeline server reads. |
+
+### How the flow works
+
+**1. Create, update, or delete a tweet**
+
+- Request goes **Client → API Gateway** (auth, rate limit, route) **→ Tweets server**.
+- Tweets server writes tweet and media **metadata** to **Tweets Primary DB**.
+- If the tweet has media, Tweets server uploads files to **AWS S3**.
+- Primary DB **syncs data to Tweets REPLICA DBs** so reads see the latest data.
+
+**2. Follow or unfollow a user**
+
+- Request goes **Client → API Gateway → User server**.
+- User server updates the relationship (follower_id, followee_id) in the **Graph DB**.
+- No tweet or timeline data is written here; only the social graph changes.
+
+**3. Fetch home timeline**
+
+- Request goes **Client → API Gateway → Timeline server**.
+- Timeline server **fetches follow data** from **Graph DB** (list of users the current user follows).
+- It then **fetches tweet and media metadata** for those users from **Tweets REPLICA DB** (or Primary).
+- For tweets that reference media, it **fetches media** from **AWS S3**.
+- Timeline server merges and orders the tweets (e.g. by time) and returns the timeline to the client.
+
+This is a **pull-based** design: the timeline is computed on read from Graph DB + Tweets DB + S3, with read replicas and S3 used to keep timeline reads fast and scalable.
+
+---
+
