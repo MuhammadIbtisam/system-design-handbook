@@ -179,7 +179,98 @@ The diagram shows how clients, API Gateway, and backend services work together w
 - For tweets that reference media, it **fetches media** from **AWS S3**.
 - Timeline server merges and orders the tweets (e.g. by time) and returns the timeline to the client.
 
-This is a **pull-based** design: the timeline is computed on read from Graph DB + Tweets DB + S3, with read replicas and S3 used to keep timeline reads fast and scalable.
+---
+
+## Potential Deep Dives
+
+### Deep Dive: Scaling timeline reads (cache + fan-out on read vs fan-out on write)
+
+We have **~20 million daily active users**. During **peak hours**, about **2–4 million users** may be active at once. If each user fetches their timeline **4–10 times** in that period, we get a very large number of **timeline read requests**. A single PostgreSQL database cannot handle this load. Below is a layered approach and why we may still need to change the read/write model.
+
+#### 1. Read replicas
+
+We already use **read replicas**: write to the primary, read from replicas. This spreads read traffic across multiple DB instances and helps a lot, but at 2–4M peak users with multiple timeline fetches each, **replicas alone are still not enough**.
+
+#### 2. Connection pooling (e.g. pgBouncer)
+
+Each application server opens DB connections. Without pooling, we can run out of connections (e.g. “too many connections”). **pgBouncer** (or similar) sits in front of PostgreSQL and **pools connections**: many app connections are multiplexed onto fewer DB connections. This avoids connection exhaustion but does **not** reduce the number of queries or the amount of work the DB does per request.
+
+#### 3. Cache (e.g. Redis) — cache-aside for timelines
+
+Add a **cache layer** (e.g. Redis) in front of the database:
+
+- **On timeline request:** Check cache first (e.g. key = `timeline:{user_id}`).
+- **Cache hit:** Return the timeline from cache; no DB call.
+- **Cache miss:** Compute the timeline (query Graph DB for follow list, query Tweets DB for tweets, merge), **store the result in cache**, then return it.
+
+This is **cache-aside** (or “lazy loading”). It greatly reduces DB load when cache hit rate is high. But:
+
+- **Fan-out on read** = we still *compute* the timeline on every cache miss: fetch follow list, fetch tweets for all followed users, merge and sort. That is **expensive per request** and can cause DB spikes during peak or when many users get cache misses (e.g. after a restart or TTL expiry).
+
+So even with replicas + pgBouncer + Redis, we can still hit limits or see latency spikes if we rely only on **fan-out on read**.
+
+#### 4. Fan-out on read vs fan-out on write
+
+| Approach | What it means | Pros | Cons |
+|----------|----------------|------|------|
+| **Fan-out on read** | When a user opens their timeline, we **fetch** tweets from everyone they follow and merge (pull model). Timeline is computed **on read**. | Simple writes (just store the tweet). No extra write load when someone has many followers. | Every timeline read (or cache miss) can be heavy: many queries, merge, sort. DB and cache can still be overwhelmed at scale. |
+| **Fan-out on write** | When a user **posts** a tweet, we **push** that tweet into the timeline cache (or pre-built feed store) of **every follower**. Timeline read = just read a pre-built list. | Timeline reads are **cheap**: one cache/store read per user. DB is used mainly for writes and for building/refreshing feeds. Much better for high read traffic. | Heavy write amplification: one tweet from a user with 1M followers = 1M writes to timeline caches/stores. Celebrities and viral tweets are expensive. |
+
+#### 5. How to solve the problem: hybrid or fan-out on write
+
+- **Fan-out on read only:** Replicas + pgBouncer + Redis (cache-aside) help, but on cache miss we still do expensive fan-out on read, so we can still hit DB limits or latency issues at peak.
+- **Fan-out on write:** Pre-build (or update) each user’s timeline when tweets are published. Reads become a single read from cache or a feed store. This **reduces read load on the DB dramatically** and fits systems where timeline reads dominate.
+- **Hybrid** is common in practice:
+  - **Fan-out on write** for “normal” users (e.g. followers below a threshold): their followers’ timelines are updated when they tweet.
+  - **Fan-out on read** (or lazy computation) for users with **very large follower counts** (celebrities, bots): we don’t push to millions of timelines on one tweet; instead we merge their tweets when building the timeline.
+
+So: **PostgreSQL alone is not enough**; we add **replicas**, **pgBouncer**, and **Redis cache**. To go further and avoid overload and latency spikes from fan-out on read, we introduce **fan-out on write** (or a **hybrid** of fan-out on write for most users and fan-out on read for the heaviest accounts).
+
+---
+
+### Deep Dive: Serving media (avoid server proxy; use direct URLs + CDN)
+
+In the high-level design we had the Timeline server (or Tweets server) **fetch media from AWS S3** and then **return it to the client**. That approach is simple but has serious drawbacks. A better approach is to let the **client fetch media directly** and to put a **CDN** in front of storage so users worldwide get low latency.
+
+#### Why the naive approach is bad
+
+| Issue | What happens |
+|-------|----------------|
+| **Server as proxy** | Every image/video request goes: Client → Our server → S3 → Our server → Client. Our server handles every byte of media traffic. |
+| **Wasted bandwidth and CPU** | Our servers download from S3 and upload to the client. We pay for double bandwidth and burn CPU and connections. |
+| **Single point of failure** | Media traffic goes through our app; if our servers are overloaded or down, media breaks too. |
+| **No global optimization** | All media is served from one place (e.g. one S3 region). Users far from that region see high latency. |
+
+#### Better approach: direct URLs + CDN
+
+**1. Don’t proxy media through the server**
+
+- Store media in **S3** (or similar). In the API response (tweet object), return a **direct URL** to the media (e.g. a signed S3 URL or, better, a **CDN URL**).
+- The **client** (browser/app) fetches the image or video **directly** from that URL. Our server is not in the path for the actual bytes.
+- Result: no media traffic through our app servers, lower load and simpler scaling.
+
+**2. Put a CDN in front of media**
+
+- **Problem:** If the media URL points straight at S3 in one region, users in other regions still have to hit that region → **slower** and S3 gets all the traffic.
+- **Solution:** Put a **CDN** (e.g. CloudFront, Cloudflare) in front of S3. The public media URL is a **CDN URL** (e.g. `https://cdn.example.com/media/xyz.jpg`).
+- **Flow:** Client requests media → **CDN edge** (nearest to the user). On **cache miss**, the edge fetches from S3, caches it, and serves the client. On **cache hit**, the edge serves from cache; the request **never reaches S3 or our server**.
+- **Benefits:** Lower latency for users in all regions, less load on S3, and less bandwidth cost than serving everything from a single origin.
+
+#### Summary
+
+| Approach | Flow | Issue |
+|----------|------|--------|
+| **Naive** | Client → Our server → S3 → Our server → Client | Server proxies all media; wasteful and doesn’t scale. |
+| **Direct S3 URL** | Client → S3 (direct) | No server proxy, but single region → slow for distant users. |
+| **Direct CDN URL** | Client → CDN edge (cache hit: edge; miss: edge → S3) | Best: no server in the path, fast globally, S3 offloaded. |
+
+**Recommendation:** Store media in S3; expose **CDN URLs** in API responses; let the client load media directly from the CDN. Our servers only deal with metadata and redirects; media is served from the edge.
+
+---
+
+## Twitter system design — full diagram
+
+![Twitter System Design](../../images/twitter/Twitter%20System%20Design.png)
 
 ---
 
