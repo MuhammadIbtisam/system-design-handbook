@@ -256,6 +256,83 @@ The design covers the three functional requirements as follows.
 
 ## Potential Deep Dives
 
-*(To be filled in: e.g. inventory consistency, preventing oversell, handling flash sales, payment flow.)*
+The diagram below shows the evolved architecture for the ticketing system: **Search Service** with **Elastic Search** (and Primary DB), **Event Service** with **Cache** and Primary DB, **Booking Service** with Primary DB and **Payment Gateway**, and a **Waiting Queue** so that when load is high the API Gateway can send booking requests to the queue and the Booking Service processes them from there.
+
+![Ticketmaster Potential Deep Dives](../../images/ticketmaster/Ticketmaster%20Deep%20Dive.png)
+
+---
+
+### 1. High availability for viewing events (cache)
+
+We need **high availability** for the “view event” flow. Put **mostly static event data** (event name, event details, venue, performers, etc.) in a **cache** (e.g. Redis).
+
+**Flow (cache-aside):**
+
+1. On **fetch event by ID**: check the cache first (e.g. key = `event:{event_id}`).
+2. **Cache hit** — Return the event from cache; no database call.
+3. **Cache miss** — Fetch from the database, **store the result in the cache**, then return it to the user.
+
+This reduces load on the DB and keeps view-event highly available and fast. Cache TTL can be set so that rare updates (e.g. event details change) eventually propagate.
+
+---
+
+### 2. Search for events (indexes vs full-text vs Elasticsearch)
+
+**Problem:** Users search by multiple factors (date, venue, location, keywords). We need efficient, flexible search.
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **DB indexes only** | Simple (e.g. B-tree on date, venue_id). | **Not enough** for rich or text search; indexes help filters but not full-text or fuzzy search. |
+| **PostgreSQL full-text search** | Use DB extensions (e.g. `tsvector`, full-text indexes). No extra system. | Uses **more space and resources**; **SELECT** queries by search term can be **slower**. Harder to scale and tune for complex relevance. |
+| **Elasticsearch / Algolia (or similar)** | **Full-text search** with good performance and relevance. **Typo tolerance** and **semantic-like** behavior (e.g. Algolia): even with spelling mistakes or missing words, users still get relevant results. Dedicated search layer that scales separately. | Extra system to run and keep in sync with the primary DB. |
+
+**Recommendation:** For production-grade search (full-text, typo tolerance, many filters), use **Elasticsearch** or **Algolia** (or similar). Sync event data from Primary DB into the search engine; Search Service queries the search engine instead of the DB. Keep PostgreSQL for transactional data; use the search layer for discovery and search.
+
+---
+
+### 3. Booking: consistency when millions are booking the same event
+
+**Problem:** For a **very popular event**, many users try to book at once. We must **never** allow two users to book the same seat (strong consistency for inventory). We also need **high throughput** — we cannot make millions of users wait in line behind a single lock.
+
+| Approach | How it works | Why it fails at scale |
+|----------|----------------|------------------------|
+| **Pessimistic locking** | First user acquires a lock on the seat (or row); others **wait** until that user’s transaction completes (book or abort). | OK for **hundreds or thousands** of requests per day. For **millions** of users, everyone waits on the same lock → **very low throughput**, bad latency, and poor UX. Not acceptable for flash sales. |
+
+**Better approach: status-based hold (pending → booked or released)**
+
+- Do **not** hold a long-lived lock that blocks everyone else.
+- Use **ticket statuses** and a **short-term hold**:
+  1. When a user **starts** a booking, move the ticket from **available** to **pending** (or “in progress”) in a **single, quick DB update** (e.g. conditional update: “set status = pending where id = ? and status = available”). If the update succeeds, the user “holds” that ticket for a limited time (e.g. 10–15 minutes).
+  2. **User pays** (Payment Gateway). On **payment success** → move ticket to **booked** and create the booking record. Consistency is preserved because only the user who holds the ticket can confirm.
+  3. If the user **does not complete payment** within the time window (or cancels), **release the hold**: move the ticket back to **available** (e.g. background job or TTL). Another user can then book it.
+
+**Why this works:** No long-lived lock; many users can be in “pending” on *different* tickets at the same time. Only one user can hold a given ticket at a time (enforced by the conditional update). We get **high consistency** (no double-booking) and **high throughput** (no global wait). This is the standard pattern for ticket booking and inventory under high concurrency.
+
+---
+
+### 4. Handling extreme traffic: queue + WebSockets (real-time queue)
+
+**Problem:** Even with **load balancing** and **horizontal scaling**, millions of users hitting the booking flow at the same time can still overwhelm the server, DB, and payment gateway. We need a way to **smooth and control** the rate of booking attempts while keeping users informed.
+
+**Queue alone:** We can put incoming booking requests into a **queue** (e.g. Kafka, RabbitMQ, Redis Queue). The server processes from the queue at a controlled rate. But if the client just gets "request received" and then waits with no feedback, the user has no idea where they stand or when their turn will come — poor UX and more support load.
+
+**Better: queue + WebSockets for real-time updates**
+
+- When load is **high**, don't let every user hit the booking API at once. Instead:
+  1. **User joins the queue** — e.g. "I want to book for this event." The server adds them to a **waiting queue** and opens a **WebSocket** (or long-lived connection) with that user.
+  2. **User waits in the socket** — They stay connected. The server sends **real-time updates** over the WebSocket: e.g. "You're in line", "Your position: 5,432", "Estimated wait: 2 minutes", "It's your turn — you can now submit your booking."
+  3. **When it's the user's turn** — The server tells them over the WebSocket that they can proceed. The client then **sends the actual booking request** (e.g. seat selection, payment). The server processes it and responds. So we **control how many users are "active" at once** — only those whose turn it is actually call the booking API.
+  4. If the user abandons or disconnects, they can be removed from the queue so the next person can move up.
+
+**Why this helps:**
+
+| Benefit | Explanation |
+|---------|-------------|
+| **Controlled throughput** | Only N users at a time (or a steady rate) get to submit a booking. The rest wait in the queue. The server, DB, and payment gateway are not overloaded. |
+| **Fair ordering** | Queue is typically FIFO (or priority), so order is clear and fair. |
+| **Real-time UX** | Users see **live updates** (position, wait time, "your turn") instead of a spinning loader or a generic "high demand" error. No need to poll or rely only on push notifications after the fact. |
+| **Scales to more traffic** | We can handle **more users** in total — they wait in the queue and get a turn instead of everyone failing or timing out. |
+
+**Summary:** Use **load balancing** and **horizontal scaling** as a base. When traffic is extreme (e.g. millions for one onsale), add a **waiting queue** and keep users connected via **WebSockets** so they get **real-time queue updates**. When it's their turn, they submit the booking request. This keeps the system stable and gives users a clear, live experience instead of blind waiting or late push notifications.
 
 ---
