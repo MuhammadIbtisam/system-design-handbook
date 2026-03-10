@@ -20,3 +20,5 @@ The goal of this handbook is not just to help you design systems, but to help yo
 - [URL Shortener (TinyURL)](./guides/URL%20Shortener/url-shortener.md) - Design a URL shortening service like TinyURL or bit.ly
 - [Twitter](./guides/Twitter/twitter.md) - Design a real-time microblogging service like Twitter
 - [Ticketmaster](./guides/Ticketmaster/ticketmaster.md) - Design a ticket booking and sales system like Ticketmaster
+- [Global Digital Rewards](./guides/Global-Digital-Rewards/global-digital-rewards.md) - Design a global digital rewards distribution system for points, gift cards, vouchers, and more
+- [High-Throughput Payout](./guides/High-Throughput-Payout/high-throughput-payout.md) - Design a high-throughput payout system for millions of daily disbursements (ACH, wire, instant, card)
