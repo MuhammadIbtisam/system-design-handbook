@@ -23,4 +23,3 @@ The goal of this handbook is not just to help you design systems, but to help yo
 - [Global Digital Rewards](./guides/Global-Digital-Rewards/global-digital-rewards.md) - Design a global digital rewards distribution system for points, gift cards, vouchers, and more
 - [High-Throughput Payout](./guides/High-Throughput-Payout/high-throughput-payout.md) - Design a high-throughput payout system for millions of daily disbursements (ACH, wire, instant, card)
 - [Limited-Stock Concurrent System](./guides/Limited-Stock-Concurrent/limited-stock-concurrent.md) - Design a limited-stock concurrent system with overselling prevention under high concurrency
-- [6 Million Free Burgers Campaign](./guides/Free-Burgers-Campaign/free-burgers-campaign.md) - Design a flash campaign system for 6M free burgers in 10 minutes (1 per account, high throughput, concurrency control)
